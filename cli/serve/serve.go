@@ -46,11 +46,11 @@ import (
 var serverUsageText = `cfssl serve -- set up a HTTP server handles CF SSL requests
 
 Usage of serve:
-        cfssl serve [-address address] [-ca cert] [-ca-bundle bundle] \
+        cfssl serve [-address address] [-min-tls-version version] [-ca cert] [-ca-bundle bundle] \
                     [-ca-key key] [-int-bundle bundle] [-int-dir dir] [-port port] \
                     [-metadata file] [-remote remote_host] [-config config] \
-                    [-responder cert] [-responder-key key] [-tls-cert cert] [-tls-key key] \
-                    [-mutual-tls-ca ca] [-mutual-tls-cn regex] \
+                    [-responder cert] [-responder-key key] \
+                    [-tls-cert cert] [-tls-key key] [-mutual-tls-ca ca] [-mutual-tls-cn regex] \
                     [-tls-remote-ca ca] [-mutual-tls-client-cert cert] [-mutual-tls-client-key key] \
                     [-db-config db-config] [-disable endpoint[,endpoint]]
 
@@ -58,9 +58,9 @@ Flags:
 `
 
 // Flags used by 'cfssl serve'
-var serverFlags = []string{"address", "port", "ca", "ca-key", "ca-bundle", "int-bundle", "int-dir", "metadata",
-	"remote", "config", "responder", "responder-key", "tls-key", "tls-cert", "mutual-tls-ca", "mutual-tls-cn",
-	"tls-remote-ca", "mutual-tls-client-cert", "mutual-tls-client-key", "db-config", "disable"}
+var serverFlags = []string{"address", "port", "min-tls-version", "ca", "ca-key", "ca-bundle", "int-bundle", "int-dir",
+	"metadata", "remote", "config", "responder", "responder-key", "tls-key", "tls-cert", "mutual-tls-ca",
+	"mutual-tls-cn", "tls-remote-ca", "mutual-tls-client-cert", "mutual-tls-client-key", "db-config", "disable"}
 
 var (
 	conf       cli.Config
@@ -218,6 +218,10 @@ var endpoints = map[string]func() (http.Handler, error){
 	},
 
 	"certinfo": func() (http.Handler, error) {
+		if db != nil {
+			return certinfo.NewAccessorHandler(certsql.NewAccessor(db)), nil
+		}
+
 		return certinfo.NewHandler(), nil
 	},
 
@@ -252,9 +256,9 @@ var endpoints = map[string]func() (http.Handler, error){
 func registerHandlers() {
 	disabled := make(map[string]bool)
 	if conf.Disable != "" {
-	    for _, endpoint := range strings.Split(conf.Disable, ",") {
-	        disabled[endpoint] = true
-	    }
+		for _, endpoint := range strings.Split(conf.Disable, ",") {
+			disabled[endpoint] = true
+		}
 	}
 
 	for path, getHandler := range endpoints {
@@ -313,6 +317,11 @@ func serverMain(args []string, c cli.Config) error {
 
 	addr := net.JoinHostPort(conf.Address, strconv.Itoa(conf.Port))
 
+	tlscfg := tls.Config{}
+	if conf.MinTLSVersion != "" {
+		tlscfg.MinVersion = helpers.StringTLSVersion(conf.MinTLSVersion)
+	}
+
 	if conf.TLSCertFile == "" || conf.TLSKeyFile == "" {
 		log.Info("Now listening on ", addr)
 		return http.ListenAndServe(addr, nil)
@@ -323,12 +332,12 @@ func serverMain(args []string, c cli.Config) error {
 			return fmt.Errorf("failed to load mutual TLS CA file: %s", err)
 		}
 
+		tlscfg.ClientAuth = tls.RequireAndVerifyClientCert
+		tlscfg.ClientCAs = clientPool
+
 		server := http.Server{
-			Addr: addr,
-			TLSConfig: &tls.Config{
-				ClientAuth: tls.RequireAndVerifyClientCert,
-				ClientCAs:  clientPool,
-			},
+			Addr:      addr,
+			TLSConfig: &tlscfg,
 		}
 
 		if conf.MutualTLSCNRegex != "" {
@@ -353,7 +362,11 @@ func serverMain(args []string, c cli.Config) error {
 		return server.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile)
 	}
 	log.Info("Now listening on https://", addr)
-	return http.ListenAndServeTLS(addr, conf.TLSCertFile, conf.TLSKeyFile, nil)
+	server := http.Server{
+		Addr:      addr,
+		TLSConfig: &tlscfg,
+	}
+	return server.ListenAndServeTLS(conf.TLSCertFile, conf.TLSKeyFile)
 
 }
 
